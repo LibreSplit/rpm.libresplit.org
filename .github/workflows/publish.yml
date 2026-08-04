@@ -326,6 +326,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
           pages_dir="${RUNNER_TEMP}/pages-worktree"
           if remote_pages="$(git ls-remote --heads origin gh-pages)" && [[ -n "${remote_pages}" ]]; then
             git fetch --no-tags --depth=1 origin "refs/heads/gh-pages:refs/remotes/origin/gh-pages"
