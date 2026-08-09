@@ -21,10 +21,6 @@ on:
         description: LibreSplit source commit hash from main
         required: true
         type: string
-      packaging_sha:
-        description: RPM commit hash used for both RPM builds
-        required: true
-        type: string
       origin_run_id:
         description: ID of the initiating LibreSplit workflow run
         required: true
@@ -37,7 +33,6 @@ concurrency:
   queue: max
 
 env:
-  PAGES_LIMIT_BYTES: "943718400"
   UPSTREAM_REPOSITORY: LibreSplit/LibreSplit
 
 jobs:
@@ -50,9 +45,9 @@ jobs:
       - name: Install Fedora tooling
         run: >-
           dnf install --assumeyes
+          cpio
           createrepo_c
           curl
-          findutils
           git
           gh
           gnupg2
@@ -97,13 +92,12 @@ jobs:
           jq '.assets' <<<"${release_json}" >"${RUNNER_TEMP}/release-assets.json"
           echo "published=false" >>"${GITHUB_OUTPUT}"
 
-      - name: Check out packaging policy
+      - name: Check out
         if: steps.release.outputs.published != 'true'
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
           persist-credentials: true
-          ref: ${{ inputs.packaging_sha }}
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Import online signing subkey
@@ -319,7 +313,6 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORIGIN_RUN_ID: ${{ inputs.origin_run_id }}
-          PACKAGING_SHA: ${{ inputs.packaging_sha }}
           RPM_RELEASE: ${{ inputs.rpm_release }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           VERSION: ${{ inputs.version }}
@@ -340,15 +333,12 @@ jobs:
 
           install -d "${pages_dir}/stable/x86_64" "${pages_dir}/stable/aarch64"
           candidate_evr="${VERSION}-${RPM_RELEASE}"
-          mapfile -t published_evrs < <(
-            find "${pages_dir}/stable/x86_64" -maxdepth 1 -type f \
-              -name 'libresplit-*.x86_64.rpm' -printf '%f\n' |
-              sed -E 's/^libresplit-(.+)\.x86_64\.rpm$/\1/' |
-              sort -V
-          )
-
-          if [[ "${#published_evrs[@]}" -gt 0 ]]; then
-            current_evr="${published_evrs[-1]}"
+          current_package="${pages_dir}/libresplit.x86_64.rpm"
+          if [[ -f "${current_package}" ]]; then
+            current_evr="$(
+              rpm -qp --nosignature --queryformat '%{VERSION}-%{RELEASE}' \
+                "${current_package}"
+            )"
             if [[ "${candidate_evr}" != "${current_evr}" &&
                   "$(printf '%s\n' "${current_evr}" "${candidate_evr}" |
                     sort -V | tail -n 1)" != "${candidate_evr}" ]]; then
@@ -359,54 +349,55 @@ jobs:
 
           : >"${pages_dir}/.nojekyll"
           printf '%s\n' 'rpm.libresplit.org' >"${pages_dir}/CNAME"
-          cp packaging/libresplit.repo "${pages_dir}/libresplit.repo"
+          repo_config_dir="${RUNNER_TEMP}/repo-config"
+          install -d "${repo_config_dir}"
+          (
+            cd "${repo_config_dir}"
+            rpm2cpio "${FINAL_RPM_DIR}/libresplit-${candidate_evr}.x86_64.rpm" |
+              cpio --quiet --extract --make-directories \
+                './etc/yum.repos.d/libresplit.repo'
+          )
+          cp "${repo_config_dir}/etc/yum.repos.d/libresplit.repo" "${pages_dir}/libresplit.repo"
           cp packaging/RPM-GPG-KEY-libresplit "${pages_dir}/RPM-GPG-KEY-libresplit"
           for architecture in x86_64 aarch64; do
             final_name="libresplit-${candidate_evr}.${architecture}.rpm"
-            cp "${FINAL_RPM_DIR}/${final_name}" "${pages_dir}/stable/${architecture}/${final_name}"
             cp "${FINAL_RPM_DIR}/${final_name}" "${pages_dir}/libresplit.${architecture}.rpm"
           done
 
-          regenerate_metadata() {
-            local architecture metadata signature
-            for architecture in x86_64 aarch64; do
-              createrepo_c --quiet --update --simple-md-filenames "${pages_dir}/stable/${architecture}"
-              metadata="${pages_dir}/stable/${architecture}/repodata/repomd.xml"
-              signature="${metadata}.asc"
-              rm -f "${signature}"
-              gpg --batch --yes --armor --detach-sign \
-                --homedir "${GNUPGHOME}" \
-                --pinentry-mode loopback --passphrase '' \
-                --local-user "${SIGNING_FINGERPRINT}!" \
-                --output "${signature}" "${metadata}"
-            done
-          }
+          for architecture in x86_64 aarch64; do
+            final_name="libresplit-${candidate_evr}.${architecture}.rpm"
+            repository_dir="${pages_dir}/stable/${architecture}"
+            delta_dir="${RUNNER_TEMP}/delta-repository-${architecture}"
+            merged_dir="${RUNNER_TEMP}/merged-repository-${architecture}"
+            install -d "${delta_dir}"
+            cp "${FINAL_RPM_DIR}/${final_name}" "${delta_dir}/${final_name}"
+            createrepo_c \
+              --quiet \
+              --baseurl="https://github.com/${UPSTREAM_REPOSITORY}/releases/download/v${VERSION}/" \
+              --simple-md-filenames \
+              "${delta_dir}"
 
-          regenerate_metadata
-          while :; do
-            site_bytes="$(
-              find "${pages_dir}" \
-                -path "${pages_dir}/.git" -prune -o \
-                -type f -printf '%s\n' |
-                awk '{ total += $1 } END { print total + 0 }'
-            )"
-
-            if [[ "${site_bytes}" -lt "${PAGES_LIMIT_BYTES}" ]]; then
-              break
+            if [[ -f "${repository_dir}/repodata/repomd.xml" ]]; then
+              mergerepo_c \
+                --all \
+                --omit-baseurl \
+                --simple-md-filenames \
+                --repo="file://${repository_dir}" \
+                --repo="file://${delta_dir}" \
+                --outputdir="${merged_dir}"
+              rm -r "${repository_dir}/repodata"
+              mv "${merged_dir}/repodata" "${repository_dir}/repodata"
+            else
+              mv "${delta_dir}/repodata" "${repository_dir}/repodata"
             fi
 
-            mapfile -t retained_evrs < <(
-              find "${pages_dir}/stable/x86_64" -maxdepth 1 -type f \
-                -name 'libresplit-*.x86_64.rpm' -printf '%f\n' |
-                sed -E 's/^libresplit-(.+)\.x86_64\.rpm$/\1/' |
-                sort -V
-            )
-
-            oldest_evr="${retained_evrs[0]}"
-            rm -f \
-              "${pages_dir}/stable/x86_64/libresplit-${oldest_evr}.x86_64.rpm" \
-              "${pages_dir}/stable/aarch64/libresplit-${oldest_evr}.aarch64.rpm"
-            regenerate_metadata
+            metadata="${repository_dir}/repodata/repomd.xml"
+            signature="${metadata}.asc"
+            gpg --batch --yes --armor --detach-sign \
+              --homedir "${GNUPGHOME}" \
+              --pinentry-mode loopback --passphrase '' \
+              --local-user "${SIGNING_FINGERPRINT}!" \
+              --output "${signature}" "${metadata}"
           done
 
           for architecture in x86_64 aarch64; do
@@ -423,7 +414,7 @@ jobs:
                 -m "Publish LibreSplit ${candidate_evr}" \
                 -m "Source: ${SOURCE_SHA}" \
                 -m "Origin run: ${ORIGIN_RUN_ID}" \
-                -m "Packaging: ${PACKAGING_SHA}"
+                -m "Publisher: ${GITHUB_SHA}"
             git -C "${pages_dir}" push origin HEAD:gh-pages
           fi
 
