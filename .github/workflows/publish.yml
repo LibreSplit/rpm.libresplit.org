@@ -100,10 +100,10 @@ jobs:
           persist-credentials: true
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Import online signing subkey
+      - name: Import RPM signing key
         if: steps.release.outputs.published != 'true'
         env:
-          RPM_SIGNING_SUBKEY_BASE64: ${{ secrets.RPM_SIGNING_SUBKEY_BASE64 }}
+          RPM_SIGNING_KEY: ${{ secrets.RPM_SIGNING_KEY }}
         run: |
           set -euo pipefail
           umask 077
@@ -114,8 +114,7 @@ jobs:
           signing_home="${RUNNER_TEMP}/signing-gnupg"
           verification_home="${RUNNER_TEMP}/verification-gnupg"
           install -d -m 0700 "${signing_home}" "${verification_home}"
-          gpg --batch --homedir "${signing_home}" --import "${public_key}"
-          printf '%s' "${RPM_SIGNING_SUBKEY_BASE64}" |
+          printf '%s' "${RPM_SIGNING_KEY}" |
             base64 --decode |
             gpg --batch --homedir "${signing_home}" --import
           gpg --batch --homedir "${verification_home}" --import "${public_key}"
@@ -124,13 +123,12 @@ jobs:
             gpg --batch --homedir "${signing_home}" --with-colons \
               --list-secret-keys |
               awk -F: '
-                $1 == "ssb" { usable = ($15 == "+"); next }
-                usable && $1 == "fpr" { print $10; exit }
+                $1 == "fpr" { print $10; exit }
               '
           )"
 
           if [[ -z "${signing_fingerprint}" ]]; then
-            echo "The signing subkey is empty." >&2
+            echo "The RPM signing key is empty." >&2
             exit 1
           fi
 
@@ -395,7 +393,6 @@ jobs:
             signature="${metadata}.asc"
             gpg --batch --yes --armor --detach-sign \
               --homedir "${GNUPGHOME}" \
-              --pinentry-mode loopback --passphrase '' \
               --local-user "${SIGNING_FINGERPRINT}!" \
               --output "${signature}" "${metadata}"
           done
