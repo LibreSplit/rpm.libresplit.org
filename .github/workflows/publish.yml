@@ -40,7 +40,6 @@ jobs:
     name: Sign and publish RPMs
     runs-on: ubuntu-24.04
     container: registry.fedoraproject.org/fedora:44
-    environment: production
     steps:
       - name: Install Fedora tooling
         run: >-
