@@ -65,9 +65,8 @@ jobs:
           repositories: |
             LibreSplit
             rpm.libresplit.org
-          permission-administration: write
           permission-contents: write
-          permission-pages: write
+          permission-pages: read
           permission-workflows: write
 
       - name: Read release state
@@ -431,10 +430,8 @@ jobs:
             200)
               ;;
             404)
-              jq -n '{source: {branch: "gh-pages", path: "/"}}' |
-                gh api --method POST \
-                  -H "X-GitHub-Api-Version: 2026-03-10" \
-                  "repos/${GITHUB_REPOSITORY}/pages" --input - >/dev/null
+              echo "GitHub Pages is not configured for ${GITHUB_REPOSITORY}." >&2
+              exit 1
               ;;
             *)
               echo "GitHub Pages lookup failed with HTTP ${pages_status}." >&2
